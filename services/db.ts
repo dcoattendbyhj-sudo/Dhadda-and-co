@@ -1,10 +1,10 @@
 
 import { createClient } from '@supabase/supabase-js';
 
-// Use Environment Variables for production deployment
+// Use Vite/Vercel standard for environment variables
 // Fallback to current values for immediate connectivity
-const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://xbvvgvzreadiultzdigq.supabase.co';
-const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_L0j1qxgCfX_p1Pp9dWM3bQ_Ako2DOji';
+const SUPABASE_URL = (import.meta as any).env?.VITE_SUPABASE_URL || 'https://xbvvgvzreadiultzdigq.supabase.co';
+const SUPABASE_ANON_KEY = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || 'sb_publishable_L0j1qxgCfX_p1Pp9dWM3bQ_Ako2DOji';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -58,7 +58,6 @@ export const db = {
         .single();
       
       if (configError) {
-        // Table not found or connection issue
         if (configError.code === '42P01') {
           throw new Error("Missing Database Schema. Please execute the SQL script in your Supabase SQL Editor.");
         }
