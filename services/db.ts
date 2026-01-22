@@ -1,9 +1,10 @@
 
 import { createClient } from '@supabase/supabase-js';
-import { User, UserRole } from '../types';
 
-const SUPABASE_URL = 'https://xbvvgvzreadiultzdigq.supabase.co';
-const SUPABASE_ANON_KEY = 'sb_publishable_L0j1qxgCfX_p1Pp9dWM3bQ_Ako2DOji';
+// Use Environment Variables for production deployment
+// Fallback to current values for immediate connectivity
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://xbvvgvzreadiultzdigq.supabase.co';
+const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'sb_publishable_L0j1qxgCfX_p1Pp9dWM3bQ_Ako2DOji';
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
