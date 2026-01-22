@@ -1,0 +1,8 @@
+{
+  "name": "Copy of AttendPro Enterprise",
+  "description": "A high-security professional attendance and leave management system with GPS geofencing and biometric selfie validation.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
