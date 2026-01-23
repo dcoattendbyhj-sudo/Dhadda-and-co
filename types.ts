@@ -1,3 +1,4 @@
+
 export enum UserRole {
   BOSS = 'BOSS',
   MANAGER = 'MANAGER',
@@ -59,6 +60,7 @@ export interface LeavePolicy {
   name: string;
   types: LeaveType[];
   createdBy: string;
+  targetRole: UserRole; // To filter which roles can use this policy
 }
 
 export interface LeaveRequest {

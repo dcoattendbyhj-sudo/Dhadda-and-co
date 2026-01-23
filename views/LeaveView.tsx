@@ -1,5 +1,6 @@
+
 import React, { useState, useEffect } from 'react';
-import { CalendarDays, Plus, CheckCircle2, Briefcase, FileText, ChevronRight } from 'lucide-react';
+import { CalendarDays, Plus, CheckCircle2, Briefcase, FileText, ChevronRight, X } from 'lucide-react';
 import { User, UserRole, LeaveRequest, LeavePolicy, LeaveStatus } from '../types';
 import { db, supabase } from '../services/db';
 
@@ -36,11 +37,8 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
 
       setRequests(allReq.filter(r => r.userId === user.id));
 
-      const myManagerId = user.managerId;
-      const relevantPolicies = allPol.filter(p => 
-        p.createdBy === myManagerId || 
-        allUsers.find(u => u.id === p.createdBy)?.role === UserRole.BOSS
-      );
+      // ONLY show policies meant for the user's role
+      const relevantPolicies = allPol.filter(p => p.targetRole === user.role);
       setPolicies(relevantPolicies);
 
       if (user.role === UserRole.BOSS) {
@@ -85,7 +83,7 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
     await db.upsert('notifications', {
       id: `n_${Date.now()}`,
       recipientId: approverId,
-      message: `ABSENCE REQUEST: ${user.name} submitted for ${leaveType.name}.`,
+      message: `LEAVE REQUEST: ${user.name} submitted for ${leaveType.name}.`,
       type: 'LEAVE_REQUEST',
       timestamp: Date.now(),
       read: false
@@ -133,7 +131,7 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
         )}
       </div>
 
-      <div className="bg-white rounded-[3rem] p-10 shadow-2xl shadow-slate-200 border border-white">
+      <div className="bg-white rounded-[3rem] p-10 shadow-2xl shadow-slate-200 border border-white min-h-[400px]">
         {showRequestForm && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-6 bg-slate-900/10 backdrop-blur-xl animate-in fade-in duration-300">
             <div className="bg-white w-full max-w-xl rounded-[3rem] p-12 shadow-2xl border border-white max-h-[90vh] overflow-y-auto">
@@ -143,30 +141,20 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
                   <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Policy Framework</label>
                   <select required value={newRequest.policyId} onChange={e => setNewRequest({...newRequest, policyId: e.target.value, typeId: ''})} className="w-full px-6 py-5 rounded-[1.5rem] bg-slate-50 font-black outline-none border border-slate-100 focus:border-indigo-500 transition-colors">
                     <option value="">Select Governing Policy</option>
-                    {policies.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    {policies.map(p => <option key={p.id} value={p.id}>{p.name} ({p.targetRole}S)</option>)}
                   </select>
                 </div>
-                
+                {/* Policy form types and dates continue same... */}
                 {selectedPolicy && (
                   <div className="animate-in slide-in-from-top-2">
                     <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Leave Category</label>
                     <div className="grid grid-cols-2 gap-3">
                       {selectedPolicy.types.map(t => (
-                        <button 
-                          key={t.id}
-                          type="button"
-                          onClick={() => setNewRequest({...newRequest, typeId: t.id})}
-                          className={`px-4 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all ${
-                            newRequest.typeId === t.id ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-100' : 'bg-white text-slate-400 border-slate-100 hover:bg-slate-50'
-                          }`}
-                        >
-                          {t.name} ({t.maxDays}D)
-                        </button>
+                        <button key={t.id} type="button" onClick={() => setNewRequest({...newRequest, typeId: t.id})} className={`px-4 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest border transition-all ${newRequest.typeId === t.id ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg' : 'bg-white text-slate-400 border-slate-100'}`}>{t.name} ({t.maxDays}D)</button>
                       ))}
                     </div>
                   </div>
                 )}
-
                 <div className="grid grid-cols-2 gap-6">
                   <div>
                     <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Commencement</label>
@@ -190,7 +178,66 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
           </div>
         )}
 
-        {/* ... Tab Rendering logic ... */}
+        {activeTab === 'requests' ? (
+          <div className="space-y-6">
+            {requests.length === 0 ? (
+              <div className="py-20 text-center">
+                 <Briefcase size={48} className="mx-auto text-slate-100 mb-4" />
+                 <p className="text-slate-400 font-black uppercase text-xs tracking-widest">No absence records in ledger.</p>
+              </div>
+            ) : (
+              requests.sort((a,b) => b.requestedAt - a.requestedAt).map(req => (
+                <div key={req.id} className="p-8 bg-slate-50 border border-slate-100 rounded-[2.5rem] flex flex-col md:flex-row md:items-center justify-between gap-6 hover:bg-white hover:shadow-xl transition-all">
+                  <div>
+                    <div className="flex items-center gap-3 mb-2">
+                       <span className={`text-[9px] font-black px-3 py-1 rounded-full uppercase tracking-widest ${req.status === LeaveStatus.APPROVED ? 'bg-emerald-100 text-emerald-600' : req.status === LeaveStatus.REJECTED ? 'bg-rose-100 text-rose-600' : 'bg-amber-100 text-amber-600'}`}>
+                         {req.status}
+                       </span>
+                       <span className="text-[9px] font-black text-slate-300 uppercase tracking-[0.2em]">{new Date(req.requestedAt).toLocaleDateString()}</span>
+                    </div>
+                    <p className="font-black text-slate-900 text-xl tracking-tight">{req.policyName}</p>
+                    <p className="text-slate-500 font-bold text-sm mt-1">{req.startDate} to {req.endDate}</p>
+                  </div>
+                  <div className="bg-white p-4 rounded-2xl border border-slate-100 md:max-w-xs w-full">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Justification</p>
+                    <p className="text-slate-600 text-xs font-medium italic truncate">{req.reason}</p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {approvals.map(req => (
+              <div key={req.id} className="p-8 bg-slate-50 border border-slate-100 rounded-[2.5rem] space-y-6 hover:bg-white hover:shadow-xl transition-all">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-1">{req.userRole} Request</p>
+                    <p className="text-2xl font-black text-slate-900 tracking-tight">{req.userName}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Timeframe</p>
+                    <p className="text-sm font-black text-slate-900">{req.startDate} → {req.endDate}</p>
+                  </div>
+                </div>
+                <div className="bg-white p-6 rounded-2xl border border-slate-100">
+                   <p className="text-[10px] font-black text-slate-300 uppercase tracking-widest mb-2">Detailed Justification</p>
+                   <p className="text-slate-600 font-bold text-sm leading-relaxed">{req.reason}</p>
+                </div>
+                <div className="flex gap-4">
+                  <button onClick={() => processApproval(req.id, LeaveStatus.APPROVED)} className="flex-1 bg-emerald-600 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-emerald-100">Approve Absence</button>
+                  <button onClick={() => processApproval(req.id, LeaveStatus.REJECTED)} className="flex-1 bg-rose-600 text-white py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-rose-100">Deny Access</button>
+                </div>
+              </div>
+            ))}
+            {approvals.length === 0 && (
+              <div className="py-20 text-center">
+                 <CheckCircle2 size={48} className="mx-auto text-slate-100 mb-4" />
+                 <p className="text-slate-400 font-black uppercase text-xs tracking-widest">Inbox Zero. No pending approvals.</p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
