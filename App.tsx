@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate, Link } from 'react-router-dom';
 import { User, UserRole, Notification } from './types';
@@ -168,14 +167,28 @@ const App: React.FC = () => {
         </aside>
 
         <main className="flex-1 p-6 md:p-12 lg:p-16 overflow-y-auto relative z-10 bg-[#f8fafc]">
-          <Routes>
-            <Route path="/" element={<DashboardView user={user} />} />
-            <Route path="/insights" element={<WorkInsightsView user={user} />} />
-            <Route path="/attendance" element={<AttendanceView user={user} />} />
-            <Route path="/leave" element={<LeaveView user={user} />} />
-            <Route path="/management" element={<ManagementView user={user} />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
+          <div className="min-h-full flex flex-col">
+            <div className="flex-1">
+              <Routes>
+                <Route path="/" element={<DashboardView user={user} />} />
+                <Route path="/insights" element={<WorkInsightsView user={user} />} />
+                <Route path="/attendance" element={<AttendanceView user={user} />} />
+                <Route path="/leave" element={<LeaveView user={user} />} />
+                <Route path="/management" element={<ManagementView user={user} />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </div>
+            
+            {/* Attribution Footer */}
+            <footer className="mt-20 pt-8 border-t border-slate-100 text-center">
+              <p className="text-[9px] font-black text-slate-300 uppercase tracking-[0.4em] mb-2">
+                Engineered by <span className="text-slate-400">Harshit Jain</span>
+              </p>
+              <p className="text-[7px] font-black text-slate-300 uppercase tracking-[0.2em] opacity-40">
+                AttendPro Enterprise Ecosystem • Secure Cloud Protocol Active
+              </p>
+            </footer>
+          </div>
         </main>
       </div>
     </HashRouter>
