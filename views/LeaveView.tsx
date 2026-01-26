@@ -1,7 +1,6 @@
-
 import React, { useState, useEffect } from 'react';
-import { CalendarDays, Plus, CheckCircle2, Briefcase, FileText, ChevronRight, X } from 'lucide-react';
-import { User, UserRole, LeaveRequest, LeavePolicy, LeaveStatus } from '../types';
+import { CalendarDays, Plus, CheckCircle2, Briefcase, FileText, ChevronRight, X, Clock } from 'lucide-react';
+import { User, UserRole, LeaveRequest, LeavePolicy, LeaveStatus, LeaveDuration } from '../types';
 import { db, supabase } from '../services/db';
 
 interface LeaveViewProps { user: User; }
@@ -19,6 +18,7 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
     typeId: '',
     startDate: '',
     endDate: '',
+    duration: LeaveDuration.FULL,
     reason: ''
   });
 
@@ -37,7 +37,6 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
 
       setRequests(allReq.filter(r => r.userId === user.id));
 
-      // ONLY show policies meant for the user's role
       const relevantPolicies = allPol.filter(p => p.targetRole === user.role);
       setPolicies(relevantPolicies);
 
@@ -71,7 +70,8 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
       policyId: policy.id,
       policyName: `${policy.name} (${leaveType.name})`,
       startDate: newRequest.startDate,
-      endDate: newRequest.endDate,
+      endDate: newRequest.duration === LeaveDuration.FULL ? newRequest.endDate : newRequest.startDate,
+      duration: newRequest.duration,
       reason: newRequest.reason,
       status: LeaveStatus.PENDING,
       requestedAt: Date.now()
@@ -83,14 +83,14 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
     await db.upsert('notifications', {
       id: `n_${Date.now()}`,
       recipientId: approverId,
-      message: `LEAVE REQUEST: ${user.name} submitted for ${leaveType.name}.`,
+      message: `LEAVE REQUEST: ${user.name} submitted for ${leaveType.name} (${newRequest.duration}).`,
       type: 'LEAVE_REQUEST',
       timestamp: Date.now(),
       read: false
     });
 
     setShowRequestForm(false);
-    setNewRequest({ policyId: '', typeId: '', startDate: '', endDate: '', reason: '' });
+    setNewRequest({ policyId: '', typeId: '', startDate: '', endDate: '', duration: LeaveDuration.FULL, reason: '' });
     refreshData();
   };
 
@@ -144,7 +144,7 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
                     {policies.map(p => <option key={p.id} value={p.id}>{p.name} ({p.targetRole}S)</option>)}
                   </select>
                 </div>
-                {/* Policy form types and dates continue same... */}
+                
                 {selectedPolicy && (
                   <div className="animate-in slide-in-from-top-2">
                     <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Leave Category</label>
@@ -155,14 +155,28 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
                     </div>
                   </div>
                 )}
+
+                <div>
+                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Absence Duration</label>
+                  <div className="grid grid-cols-3 gap-3">
+                    {[
+                      { id: LeaveDuration.FULL, label: 'Full Day' },
+                      { id: LeaveDuration.FIRST_HALF, label: '1st Half' },
+                      { id: LeaveDuration.SECOND_HALF, label: '2nd Half' }
+                    ].map(d => (
+                      <button key={d.id} type="button" onClick={() => setNewRequest({...newRequest, duration: d.id})} className={`px-3 py-4 rounded-2xl text-[9px] font-black uppercase tracking-widest border transition-all ${newRequest.duration === d.id ? 'bg-slate-900 text-white border-slate-900 shadow-lg' : 'bg-white text-slate-400 border-slate-100'}`}>{d.label}</button>
+                    ))}
+                  </div>
+                </div>
+
                 <div className="grid grid-cols-2 gap-6">
                   <div>
                     <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Commencement</label>
                     <input required type="date" value={newRequest.startDate} onChange={e => setNewRequest({...newRequest, startDate: e.target.value})} className="w-full px-6 py-5 rounded-[1.5rem] bg-slate-50 font-black outline-none border border-slate-100" />
                   </div>
                   <div>
-                    <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">Conclusion</label>
-                    <input required type="date" value={newRequest.endDate} onChange={e => setNewRequest({...newRequest, endDate: e.target.value})} className="w-full px-6 py-5 rounded-[1.5rem] bg-slate-50 font-black outline-none border border-slate-100" />
+                    <label className={`block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3 ${newRequest.duration !== LeaveDuration.FULL ? 'opacity-30' : ''}`}>Conclusion</label>
+                    <input disabled={newRequest.duration !== LeaveDuration.FULL} required={newRequest.duration === LeaveDuration.FULL} type="date" value={newRequest.duration === LeaveDuration.FULL ? newRequest.endDate : newRequest.startDate} onChange={e => setNewRequest({...newRequest, endDate: e.target.value})} className={`w-full px-6 py-5 rounded-[1.5rem] bg-slate-50 font-black outline-none border border-slate-100 ${newRequest.duration !== LeaveDuration.FULL ? 'opacity-30' : ''}`} />
                   </div>
                 </div>
                 <div>
@@ -193,10 +207,13 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
                        <span className={`text-[9px] font-black px-3 py-1 rounded-full uppercase tracking-widest ${req.status === LeaveStatus.APPROVED ? 'bg-emerald-100 text-emerald-600' : req.status === LeaveStatus.REJECTED ? 'bg-rose-100 text-rose-600' : 'bg-amber-100 text-amber-600'}`}>
                          {req.status}
                        </span>
+                       <span className="text-[9px] font-black text-indigo-500/50 uppercase tracking-widest">
+                         {req.duration === LeaveDuration.FULL ? 'FULL DAY' : req.duration.replace('_', ' ')}
+                       </span>
                        <span className="text-[9px] font-black text-slate-300 uppercase tracking-[0.2em]">{new Date(req.requestedAt).toLocaleDateString()}</span>
                     </div>
                     <p className="font-black text-slate-900 text-xl tracking-tight">{req.policyName}</p>
-                    <p className="text-slate-500 font-bold text-sm mt-1">{req.startDate} to {req.endDate}</p>
+                    <p className="text-slate-500 font-bold text-sm mt-1">{req.startDate} {req.endDate !== req.startDate ? `to ${req.endDate}` : ''}</p>
                   </div>
                   <div className="bg-white p-4 rounded-2xl border border-slate-100 md:max-w-xs w-full">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Justification</p>
@@ -212,12 +229,12 @@ const LeaveView: React.FC<LeaveViewProps> = ({ user }) => {
               <div key={req.id} className="p-8 bg-slate-50 border border-slate-100 rounded-[2.5rem] space-y-6 hover:bg-white hover:shadow-xl transition-all">
                 <div className="flex justify-between items-start">
                   <div>
-                    <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-1">{req.userRole} Request</p>
+                    <p className="text-[10px] font-black text-indigo-600 uppercase tracking-widest mb-1">{req.userRole} Request ({req.duration.replace('_', ' ')})</p>
                     <p className="text-2xl font-black text-slate-900 tracking-tight">{req.userName}</p>
                   </div>
                   <div className="text-right">
                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Timeframe</p>
-                    <p className="text-sm font-black text-slate-900">{req.startDate} → {req.endDate}</p>
+                    <p className="text-sm font-black text-slate-900">{req.startDate} {req.endDate !== req.startDate ? `→ ${req.endDate}` : ''}</p>
                   </div>
                 </div>
                 <div className="bg-white p-6 rounded-2xl border border-slate-100">

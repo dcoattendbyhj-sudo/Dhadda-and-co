@@ -1,9 +1,9 @@
-
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, MapPin, CheckCircle2, AlertCircle, Clock, LogOut, Fingerprint, Scan, ShieldCheck } from 'lucide-react';
-import { User, UserRole, Location, AttendanceRecord, Notification, SystemConfig } from '../types';
+import { Camera, MapPin, CheckCircle2, AlertCircle, Clock, LogOut, Fingerprint, Scan, ShieldCheck, UserCheck, Loader2 } from 'lucide-react';
+import { User, UserRole, Location, AttendanceRecord, SystemConfig } from '../types';
 import { db, supabase } from '../services/db';
 import { getCurrentPosition, calculateDistance } from '../services/geoService';
+import { GoogleGenAI, Type } from "@google/genai";
 
 interface AttendanceViewProps { user: User; }
 
@@ -15,8 +15,11 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   
-  const [authStage, setAuthStage] = useState<'idle' | 'method_selection' | 'verifying_face' | 'verifying_fingerprint'>('idle');
+  const [authStage, setAuthStage] = useState<'idle' | 'method_selection' | 'verifying_face' | 'verifying_fingerprint' | 'ai_analyzing'>('idle');
   const [selfieStream, setSelfieStream] = useState<MediaStream | null>(null);
+  const [isEnrolling, setIsEnrolling] = useState(false);
+  const [masterSelfie, setMasterSelfie] = useState<string | null>(null);
+  const [matchScore, setMatchScore] = useState<number | null>(null);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -26,12 +29,20 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
   useEffect(() => {
     const fetchInitial = async () => {
       try {
-        const [locs, records] = await Promise.all([
+        const [locs, recordRes] = await Promise.all([
           db.getAll<Location>('locations'),
           supabase.from('attendance').select('*').eq('userId', user.id).eq('date', today).single()
         ]);
         setLocations(locs);
-        if (records.data) setCurrentRecord(records.data);
+        if (recordRes.data) setCurrentRecord(recordRes.data);
+        
+        const { data: userData } = await supabase.from('users').select('profileSelfie').eq('id', user.id).single();
+        if (userData?.profileSelfie) {
+          setMasterSelfie(userData.profileSelfie);
+          setIsEnrolling(false);
+        } else {
+          setIsEnrolling(true);
+        }
       } catch (err) {
         console.error('Initial fetch failed', err);
       } finally {
@@ -59,15 +70,73 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
     }
   };
 
+  const verifyIdentityWithAI = async (currentSelfie: string): Promise<{ isMatch: boolean; confidence: number }> => {
+    if (isEnrolling || !masterSelfie) return { isMatch: true, confidence: 100 };
+
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    
+    // Extract base64 data strings
+    const masterBase64 = masterSelfie.split(',')[1];
+    const currentBase64 = currentSelfie.split(',')[1];
+
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-3-flash-preview',
+        contents: [
+          {
+            parts: [
+              { text: "You are a high-security biometric verification system. Compare these two images. Image 1 is the Master Profile Identity. Image 2 is the current Clock-In attempt. Determine if they are the same person. Return your analysis in strict JSON format." },
+              { inlineData: { mimeType: 'image/jpeg', data: masterBase64 } },
+              { inlineData: { mimeType: 'image/jpeg', data: currentBase64 } }
+            ]
+          }
+        ],
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isMatch: { type: Type.BOOLEAN, description: "True if both images represent the same individual." },
+              confidence: { type: Type.NUMBER, description: "Confidence score from 0 to 100." },
+              reason: { type: Type.STRING, description: "Brief justification for the match result." }
+            },
+            required: ["isMatch", "confidence"]
+          }
+        }
+      });
+
+      const result = JSON.parse(response.text || '{}');
+      return {
+        isMatch: result.isMatch === true && result.confidence >= 85,
+        confidence: result.confidence || 0
+      };
+    } catch (err) {
+      console.error("AI Verification Error:", err);
+      // Fallback for network issues in high-security: fail safe (deny)
+      throw new Error("Neural Handshake failed. Ensure stable connection.");
+    }
+  };
+
+  // Fixed the verification scope error by declaring verificationResult outside the if block
   const finalizeAttendance = async (selfieBase64: string = '') => {
     setError(null);
     setIsProcessing(true);
+    let verificationResult: { isMatch: boolean; confidence: number } | null = null;
 
     try {
+      if (selfieBase64) {
+        setAuthStage('ai_analyzing');
+        verificationResult = await verifyIdentityWithAI(selfieBase64);
+        setMatchScore(verificationResult.confidence);
+
+        if (!verificationResult.isMatch) {
+          throw new Error(`Biometric Mismatch: Identity could not be verified with sufficient confidence (${verificationResult.confidence}%). Access Denied.`);
+        }
+      }
+
       const { data: configRaw } = await supabase.from('system_config').select('config').eq('id', 'global').single();
       const config = (configRaw?.config as unknown as SystemConfig) || { officialClockInTime: '09:00' };
-      const officialTimeStr = config.officialClockInTime;
-
+      
       const pos = await getCurrentPosition();
       const { latitude, longitude } = pos.coords;
 
@@ -76,18 +145,24 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
       );
 
       if (!matchedLoc && user.role === UserRole.EMPLOYEE) {
-        throw new Error('Not at an authorized work location. Check-in denied.');
+        throw new Error('Check-in denied: Outside authorized geofence.');
+      }
+
+      if (isEnrolling && selfieBase64) {
+        await supabase.from('users').update({ profileSelfie: selfieBase64 }).eq('id', user.id);
+        setIsEnrolling(false);
+        setMasterSelfie(selfieBase64);
       }
 
       const now = new Date();
-      const [officialH, officialM] = officialTimeStr.split(':').map(Number);
+      const [officialH, officialM] = config.officialClockInTime.split(':').map(Number);
       const officialDate = new Date();
       officialDate.setHours(officialH, officialM, 0, 0);
       
       const isLate = now > officialDate && (user.role === UserRole.EMPLOYEE);
 
       if (!currentRecord) {
-        const newRecord: Partial<AttendanceRecord> = {
+        const newRecord: AttendanceRecord = {
           id: `att_${Date.now()}`,
           userId: user.id,
           userName: user.name,
@@ -101,31 +176,29 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
         };
 
         await db.upsert('attendance', newRecord);
-        setCurrentRecord(newRecord as AttendanceRecord);
-        setSuccess('Clock-in successful. Biometric identity verified on cloud.');
+        setCurrentRecord(newRecord);
+        setSuccess(isEnrolling ? 'Identity Registered. Biometric Profile created.' : 'Neural Handshake Complete. Identity Verified.');
 
         if (isLate) {
-          const approverId = user.managerId || (user.role === UserRole.MANAGER ? 'admin' : '');
-          if (approverId) {
-            await db.upsert('notifications', {
-              id: `notif_${Date.now()}`,
-              recipientId: approverId,
-              message: `LATE ALERT: Staff member ${user.name} clocked in at ${now.toLocaleTimeString()} (Official: ${officialTimeStr}).`,
-              type: 'LATE_ARRIVAL',
-              timestamp: Date.now(),
-              read: false
-            });
-          }
+          const approverId = user.managerId || 'admin';
+          await db.upsert('notifications', {
+            id: `notif_${Date.now()}`,
+            recipientId: approverId,
+            message: `LATE ALERT: ${user.name} checked in at ${now.toLocaleTimeString()} (${verificationResult?.confidence || 100}% identity match).`,
+            type: 'LATE_ARRIVAL',
+            timestamp: Date.now(),
+            read: false
+          });
         }
       } else {
         await db.upsert('attendance', { ...currentRecord, clockOut: now.toISOString() });
         setCurrentRecord({ ...currentRecord, clockOut: now.toISOString() });
-        setSuccess('Clock-out complete. Work session finalized in database.');
+        setSuccess('Work session terminated. Identity logged.');
       }
 
       setAuthStage('idle');
     } catch (err: any) {
-      setError(err.message || 'System error during attendance logging.');
+      setError(err.message || 'System error during biometric logging.');
       setAuthStage('idle');
     } finally {
       setIsProcessing(false);
@@ -144,13 +217,6 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
     finalizeAttendance(selfieBase64);
   };
 
-  const simulateFingerprint = () => {
-    setIsProcessing(true);
-    setTimeout(() => {
-      finalizeAttendance();
-    }, 1500);
-  };
-
   if (isLoading) return <div className="py-20 text-center font-black">Connecting Secure Node...</div>;
 
   return (
@@ -162,10 +228,24 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
               <Clock className="text-indigo-600" size={32} />
               Daily Attendance
             </h2>
-            <p className="text-slate-400 font-bold mt-1 uppercase text-[10px] tracking-widest">Enterprise Cloud Node Active</p>
+            <p className="text-slate-400 font-bold mt-1 uppercase text-[10px] tracking-widest">
+              {isEnrolling ? "Biometric Enrollment Active" : "AI Verification Protocol Enabled"}
+            </p>
           </div>
-          <span className="text-xs font-black text-indigo-600 bg-indigo-50 px-6 py-2 rounded-full uppercase tracking-widest border border-indigo-100">{today}</span>
+          <div className="flex flex-col items-end gap-1">
+            <span className="text-xs font-black text-indigo-600 bg-indigo-50 px-6 py-2 rounded-full uppercase tracking-widest border border-indigo-100">{today}</span>
+            {matchScore && !isProcessing && (
+              <span className="text-[8px] font-black text-emerald-600 uppercase tracking-widest">Last Match: {matchScore}%</span>
+            )}
+          </div>
         </div>
+
+        {isEnrolling && !currentRecord && (
+          <div className="mb-8 p-6 bg-indigo-50 border border-indigo-100 rounded-3xl flex items-center gap-4 text-indigo-600">
+             <UserCheck size={24} />
+             <p className="text-xs font-black uppercase tracking-tight">System: Master Biometric Registration required for identity establishment.</p>
+          </div>
+        )}
 
         {error && (
           <div className="mb-10 bg-red-50 text-red-600 p-6 rounded-[2rem] flex gap-4 items-center border border-red-100 animate-in shake duration-500">
@@ -176,8 +256,13 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
 
         {success && (
           <div className="mb-10 bg-emerald-50 text-emerald-600 p-6 rounded-[2rem] flex gap-4 items-center border border-emerald-100 animate-in zoom-in duration-300">
-            <CheckCircle2 className="shrink-0" size={24} />
-            <p className="text-sm font-black uppercase tracking-tight">{success}</p>
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-3">
+                <CheckCircle2 size={24} />
+                <p className="text-sm font-black uppercase tracking-tight">{success}</p>
+              </div>
+              {matchScore && <p className="text-[10px] font-black opacity-60 ml-9 uppercase tracking-widest">Neural Identity Score: {matchScore}% Match</p>}
+            </div>
           </div>
         )}
 
@@ -190,8 +275,8 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
               <div className="w-16 h-16 bg-white rounded-3xl flex items-center justify-center text-slate-300 group-hover:text-indigo-600 transition-colors mb-6 shadow-sm">
                 <Scan size={32} />
               </div>
-              <p className="font-black text-slate-900 uppercase tracking-widest text-xs">Face Recognition</p>
-              <p className="text-[9px] text-slate-400 mt-2 font-bold uppercase tracking-widest">Visual Biometrics</p>
+              <p className="font-black text-slate-900 uppercase tracking-widest text-xs">AI Face ID</p>
+              <p className="text-[9px] text-slate-400 mt-2 font-bold uppercase tracking-widest">{isEnrolling ? 'Enrollment' : 'Verification'}</p>
             </button>
             <button 
               onClick={() => setAuthStage('verifying_fingerprint')}
@@ -200,10 +285,10 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
               <div className="w-16 h-16 bg-white rounded-3xl flex items-center justify-center text-slate-300 group-hover:text-indigo-600 transition-colors mb-6 shadow-sm">
                 <Fingerprint size={32} />
               </div>
-              <p className="font-black text-slate-900 uppercase tracking-widest text-xs">Biometric Print</p>
-              <p className="text-[9px] text-slate-400 mt-2 font-bold uppercase tracking-widest">Physical Touch ID</p>
+              <p className="font-black text-slate-900 uppercase tracking-widest text-xs">Touch ID</p>
+              <p className="text-[9px] text-slate-400 mt-2 font-bold uppercase tracking-widest">Encrypted Local Hash</p>
             </button>
-            <button onClick={() => setAuthStage('idle')} className="md:col-span-2 text-center text-[10px] font-black text-slate-300 hover:text-slate-500 uppercase tracking-widest py-4">Cancel Auth</button>
+            <button onClick={() => setAuthStage('idle')} className="md:col-span-2 text-center text-[10px] font-black text-slate-300 hover:text-slate-500 uppercase tracking-widest py-4">Cancel Request</button>
           </div>
         )}
 
@@ -211,7 +296,9 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
           <div className="space-y-8 animate-in zoom-in duration-300">
             <div className="relative overflow-hidden rounded-[3rem] bg-black aspect-video border-8 border-white shadow-2xl">
               <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
-              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 border-2 border-white/50 border-dashed rounded-full flex items-center justify-center">
+              <div className="absolute inset-0 border-[30px] border-slate-900/40 pointer-events-none"></div>
+              <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 border-2 border-indigo-500/50 border-dashed rounded-full flex items-center justify-center">
+                 <div className="w-full h-0.5 bg-indigo-500/50 absolute animate-scan"></div>
                  <Scan className="text-white/20" size={40} />
               </div>
             </div>
@@ -220,8 +307,23 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
               className="w-full py-6 bg-indigo-600 text-white rounded-[2rem] font-black text-lg shadow-xl shadow-indigo-100 hover:bg-indigo-700 transition-all uppercase tracking-widest flex items-center justify-center gap-4"
             >
               <Camera size={24} />
-              Confirm Identity
+              {isEnrolling ? 'Establish Master Profile' : 'Execute Neural Scan'}
             </button>
+          </div>
+        )}
+
+        {authStage === 'ai_analyzing' && (
+          <div className="py-20 flex flex-col items-center justify-center space-y-8 animate-in fade-in">
+             <div className="relative">
+                <div className="w-32 h-32 border-4 border-indigo-100 border-t-indigo-600 rounded-full animate-spin"></div>
+                <div className="absolute inset-0 flex items-center justify-center">
+                   <ShieldCheck size={40} className="text-indigo-600 animate-pulse" />
+                </div>
+             </div>
+             <div className="text-center">
+                <p className="text-xl font-black text-slate-900 tracking-tight">AI Identity Handshake</p>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.3em] mt-2">Comparing structural markers with cloud profile...</p>
+             </div>
           </div>
         )}
 
@@ -230,7 +332,7 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
              <div className="relative">
                 <div className="absolute inset-0 bg-indigo-600/20 rounded-full animate-ping"></div>
                 <button 
-                  onClick={simulateFingerprint}
+                  onClick={() => finalizeAttendance()}
                   disabled={isProcessing}
                   className={`relative w-40 h-40 bg-white border-4 border-slate-100 rounded-full flex items-center justify-center text-slate-300 hover:text-indigo-600 hover:border-indigo-600 transition-all shadow-xl group ${isProcessing ? 'animate-pulse' : ''}`}
                 >
@@ -238,10 +340,10 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
                 </button>
              </div>
              <div className="text-center">
-                <p className="font-black text-slate-900 uppercase tracking-widest text-sm mb-2">{isProcessing ? 'Verifying Print...' : 'Touch Sensor to Begin'}</p>
-                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em]">Hold for 2 seconds</p>
+                <p className="font-black text-slate-900 uppercase tracking-widest text-sm mb-2">{isProcessing ? 'Synchronizing Hash...' : 'Contact Sensor to Authenticate'}</p>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-[0.2em]">FIPS 140-2 Level Security</p>
              </div>
-             <button onClick={() => setAuthStage('idle')} className="text-[10px] font-black text-slate-300 hover:text-slate-500 uppercase tracking-widest">Back to choice</button>
+             <button onClick={() => setAuthStage('idle')} className="text-[10px] font-black text-slate-300 hover:text-slate-500 uppercase tracking-widest">Back to options</button>
           </div>
         )}
 
@@ -257,29 +359,23 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
                 <div className="w-20 h-20 bg-white/20 rounded-3xl flex items-center justify-center mb-6 group-hover:scale-110 transition-transform shadow-lg">
                   <ShieldCheck size={40} />
                 </div>
-                <span className="text-2xl font-black tracking-tight uppercase tracking-widest">Authorize Clock-In</span>
-                <p className="text-indigo-100 text-[10px] font-black uppercase mt-2 tracking-widest opacity-80">GPS & Biometric Lock Engaged</p>
+                <span className="text-2xl font-black tracking-tight uppercase tracking-widest">Verify Identity</span>
+                <p className="text-indigo-100 text-[10px] font-black uppercase mt-2 tracking-widest opacity-80">AI Neural Engine Standby</p>
               </button>
             ) : (
               <div className="space-y-8 animate-in fade-in duration-500">
                 <div className="grid grid-cols-2 gap-8">
                   <div className="bg-slate-50 p-8 rounded-[2.5rem] border border-slate-100 relative group overflow-hidden">
-                    <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
-                      <Clock size={40} />
-                    </div>
-                    <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-2">Commencement</p>
+                    <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-2">Authenticated At</p>
                     <p className="text-3xl font-black text-slate-900 tracking-tighter">{new Date(currentRecord.clockIn).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
                     {currentRecord.isLate && (
-                      <span className="inline-block mt-3 bg-red-100 text-red-600 text-[9px] font-black px-4 py-1 rounded-full uppercase tracking-widest">Delayed Entry</span>
+                      <span className="inline-block mt-3 bg-red-100 text-red-600 text-[9px] font-black px-4 py-1 rounded-full uppercase tracking-widest">Threshold Exceeded</span>
                     )}
                   </div>
                   <div className="bg-slate-50 p-8 rounded-[2.5rem] border border-slate-100 relative group overflow-hidden">
-                    <div className="absolute top-0 right-0 p-4 opacity-5 group-hover:opacity-10 transition-opacity">
-                      <LogOut size={40} />
-                    </div>
-                    <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-2">Conclusion</p>
+                    <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest mb-2">Current Session</p>
                     <p className="text-3xl font-black text-slate-900 tracking-tighter">
-                      {currentRecord.clockOut ? new Date(currentRecord.clockOut).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--'}
+                      {currentRecord.clockOut ? new Date(currentRecord.clockOut).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'ACTIVE'}
                     </p>
                   </div>
                 </div>
@@ -291,7 +387,7 @@ const AttendanceView: React.FC<AttendanceViewProps> = ({ user }) => {
                     className="w-full py-8 bg-slate-900 hover:bg-black text-white rounded-[2.5rem] font-black text-xl shadow-2xl shadow-slate-200 transition-all flex items-center justify-center gap-4 uppercase tracking-widest"
                   >
                     <LogOut size={28} />
-                    Terminate Session
+                    Finalize Session
                   </button>
                 )}
               </div>

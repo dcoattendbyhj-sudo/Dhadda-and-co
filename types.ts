@@ -1,4 +1,3 @@
-
 export enum UserRole {
   BOSS = 'BOSS',
   MANAGER = 'MANAGER',
@@ -11,6 +10,12 @@ export enum LeaveStatus {
   REJECTED = 'REJECTED'
 }
 
+export enum LeaveDuration {
+  FULL = 'FULL',
+  FIRST_HALF = 'FIRST_HALF',
+  SECOND_HALF = 'SECOND_HALF'
+}
+
 export interface User {
   id: string;
   name: string;
@@ -18,6 +23,7 @@ export interface User {
   password?: string;
   managerId?: string; // For Employees/Managers
   createdAt: number;
+  profileSelfie?: string; // Master biometric image
 }
 
 export interface SystemConfig {
@@ -72,6 +78,7 @@ export interface LeaveRequest {
   policyName: string;
   startDate: string;
   endDate: string;
+  duration: LeaveDuration; // FULL, FIRST_HALF, SECOND_HALF
   reason: string;
   status: LeaveStatus;
   requestedAt: number;

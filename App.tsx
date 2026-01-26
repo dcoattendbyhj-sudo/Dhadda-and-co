@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate, Link } from 'react-router-dom';
-import { User, UserRole, Notification } from './types';
+import { User, UserRole, Notification, SystemConfig, AttendanceRecord } from './types';
 import { STORAGE_KEYS } from './constants';
-import { db } from './services/db';
+import { db, supabase } from './services/db';
 
 // Icons
 import { 
@@ -15,7 +15,8 @@ import {
   ShieldCheck,
   BarChart3,
   Menu,
-  X
+  X,
+  RefreshCw
 } from 'lucide-react';
 
 // Views
@@ -32,6 +33,7 @@ const App: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [scrubbing, setScrubbing] = useState(false);
 
   useEffect(() => {
     const session = localStorage.getItem(STORAGE_KEYS.SESSION);
@@ -41,7 +43,69 @@ const App: React.FC = () => {
     setLoading(false);
   }, []);
 
-  // Fix: Replaced synchronous db.get with async db.getFiltered to fetch notifications
+  // Auto Clock-Out Scrub Logic
+  useEffect(() => {
+    const runAutoClockOutScrub = async () => {
+      if (!user) return;
+      setScrubbing(true);
+      try {
+        const { data: configRaw } = await supabase.from('system_config').select('config').eq('id', 'global').single();
+        const config = (configRaw?.config as unknown as SystemConfig);
+        if (!config) return;
+
+        const officialOutTime = config.officialClockOutTime; // "HH:mm"
+        const [outH, outM] = officialOutTime.split(':').map(Number);
+        
+        // Fetch all open sessions
+        const { data: openSessions } = await supabase
+          .from('attendance')
+          .select('*')
+          .is('clockOut', null);
+
+        if (openSessions && openSessions.length > 0) {
+          const now = new Date();
+          const todayStr = now.toISOString().split('T')[0];
+          
+          for (const session of openSessions) {
+            const sessionDate = session.date;
+            let shouldClose = false;
+            let closeAt = "";
+
+            if (sessionDate < todayStr) {
+              // Stale from previous day
+              shouldClose = true;
+              const d = new Date(sessionDate);
+              d.setHours(outH, outM, 0, 0);
+              closeAt = d.toISOString();
+            } else if (sessionDate === todayStr) {
+              // Same day, check if past cutoff
+              const cutoff = new Date();
+              cutoff.setHours(outH, outM, 0, 0);
+              if (now > cutoff) {
+                shouldClose = true;
+                closeAt = cutoff.toISOString();
+              }
+            }
+
+            if (shouldClose) {
+              await supabase.from('attendance').update({ 
+                clockOut: closeAt,
+                // Optional: mark as auto-closed
+                selfieBase64: session.selfieBase64 + ' [AUTO_TERMINATED]'
+              }).eq('id', session.id);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Auto Clock-Out Protocol Failed:", err);
+      } finally {
+        setScrubbing(false);
+      }
+    };
+
+    runAutoClockOutScrub();
+  }, [user]);
+
   useEffect(() => {
     const fetchNotifications = async () => {
       if (user) {
@@ -66,7 +130,7 @@ const App: React.FC = () => {
     <div className="h-screen w-full flex items-center justify-center bg-white">
       <div className="text-center">
         <div className="w-12 h-12 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-        <p className="font-black text-slate-900 tracking-tighter">AttendPro Loading...</p>
+        <p className="font-black text-slate-900 tracking-tighter uppercase text-[10px]">Initializing System Security...</p>
       </div>
     </div>
   );
@@ -106,7 +170,6 @@ const App: React.FC = () => {
             <span className="font-black text-lg tracking-tighter">AttendPro<span className="text-indigo-600">.</span></span>
           </div>
           <div className="flex items-center gap-4">
-            {/* Fix: Updated onRefresh to use async db.getFiltered */}
             <NotificationCenter notifications={notifications} userId={user.id} onRefresh={async () => {
                try {
                  const allNotifs = await db.getFiltered<Notification>('notifications', 'recipientId', user.id);
@@ -148,10 +211,16 @@ const App: React.FC = () => {
           </nav>
 
           <div className="mt-auto">
+            {scrubbing && (
+               <div className="flex items-center gap-2 mb-4 px-4 py-2 bg-indigo-50 rounded-xl">
+                 <RefreshCw size={12} className="text-indigo-600 animate-spin" />
+                 <span className="text-[8px] font-black text-indigo-600 uppercase tracking-widest">Protocol Syncing</span>
+               </div>
+            )}
             <div className="bg-slate-50 rounded-3xl p-5 mb-8 border border-slate-100">
               <div className="flex items-center gap-4">
-                <div className="w-12 h-12 rounded-2xl bg-white border border-slate-200 flex items-center justify-center font-black text-lg text-indigo-600 shadow-sm">
-                  {user.name.charAt(0)}
+                <div className="w-12 h-12 rounded-2xl bg-white border border-slate-200 flex items-center justify-center font-black text-lg text-indigo-600 shadow-sm overflow-hidden">
+                  {user.profileSelfie ? <img src={user.profileSelfie} className="w-full h-full object-cover" /> : user.name.charAt(0)}
                 </div>
                 <div className="overflow-hidden">
                   <p className="font-black text-sm text-slate-900 truncate">{user.name}</p>
@@ -179,13 +248,12 @@ const App: React.FC = () => {
               </Routes>
             </div>
             
-            {/* Attribution Footer */}
             <footer className="mt-20 pt-8 border-t border-slate-100 text-center">
               <p className="text-[9px] font-black text-slate-300 uppercase tracking-[0.4em] mb-2">
                 Engineered by <span className="text-slate-400">Harshit Jain</span>
               </p>
               <p className="text-[7px] font-black text-slate-300 uppercase tracking-[0.2em] opacity-40">
-                AttendPro Enterprise Ecosystem • Secure Cloud Protocol Active
+                AttendPro Enterprise Ecosystem • Auto Clock-Out Protocol Active
               </p>
             </footer>
           </div>
