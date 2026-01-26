@@ -13,9 +13,10 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.1.0",
-    "lucide-react": "^0.460.0",
+    "lucide-react": "^0.562.0",
     "recharts": "^2.13.0",
-    "@supabase/supabase-js": "^2.45.1"
+    "@supabase/supabase-js": "^2.45.1",
+    "@google/genai": "^1.38.0"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
